@@ -1,4 +1,3 @@
-import sqlite3
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -12,6 +11,8 @@ BOT_USERNAME = "HodamaEwaa01Bot"          # '@' නැතුව
 STORAGE_GROUP_ID = -5226449370              # Videos දාන group ID එක
 UPDATE_CHANNEL_ID = -1005989625595          # Alert msg යවන channel ID එක
 
+FIREBASE_DB_URL = "https://bot-blogger-91e08-default-rtdb.firebaseio.com"
+
 IMGBB_API_KEY = "b6583ee2ba41977b23dac3ea95a28f7d"
 
 GMAIL_ADDRESS = "chathumaldevinda15@gmail.com"
@@ -19,57 +20,61 @@ GMAIL_APP_PASSWORD = "dtxagmiwgmkfllhn"
 BLOGGER_SECRET_EMAIL = "chathumaldevinda15.vidpost9842@blogger.com"
 
 BLOG_URL = "https://sitenewphotohub.blogspot.com/"
-DB_PATH = "videos.db"
 # ===================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS videos (
-            vid_id TEXT PRIMARY KEY,
-            file_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            thumb_url TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+def _db_url(path: str) -> str:
+    base = FIREBASE_DB_URL.rstrip("/")
+    clean_path = path.lstrip("/")
+    return f"{base}/{clean_path}.json"
 
 
-def get_next_vid_id():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM videos")
-    count = cur.fetchone()[0] + 1
-    conn.close()
-    return f"v{count}"
+def get_next_vid_id() -> str:
+    try:
+        resp = requests.get(_db_url("videos"), timeout=15)
+        data = resp.json()
+        if isinstance(data, dict):
+            # පවතින v<number> IDs බලා ඊළඟ අංකය ගන්නවා (delete කළත් duplicate නොවෙන්න)
+            max_num = 0
+            for key in data.keys():
+                if isinstance(key, str) and key.startswith("v") and key[1:].isdigit():
+                    num = int(key[1:])
+                    if num > max_num:
+                        max_num = num
+            return f"v{max_num + 1}"
+    except Exception as e:
+        print("Firebase ID generation error:", e)
+    return "v1"
 
 
-def save_video(vid_id, file_id, title, thumb_url):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO videos (vid_id, file_id, title, thumb_url) VALUES (?, ?, ?, ?)",
-        (vid_id, file_id, title, thumb_url),
-    )
-    conn.commit()
-    conn.close()
+def save_video(vid_id: str, file_id: str, title: str, thumb_url: str | None) -> None:
+    payload = {
+        "file_id": file_id,
+        "title": title,
+        "thumb_url": thumb_url,
+    }
+    resp = requests.put(_db_url(f"videos/{vid_id}"), json=payload, timeout=15)
+    resp.raise_for_status()
 
 
-def get_video(vid_id):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT file_id, title, thumb_url FROM videos WHERE vid_id = ?", (vid_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
+def get_video(vid_id: str):
+    try:
+        resp = requests.get(_db_url(f"videos/{vid_id}"), timeout=15)
+        data = resp.json()
+        if isinstance(data, dict) and data.get("file_id"):
+            return (
+                data.get("file_id"),
+                data.get("title", ""),
+                data.get("thumb_url"),
+            )
+    except Exception as e:
+        print("Firebase read error:", e)
+    return None
 
 
-def upload_thumb_to_imgbb(file_id):
+def upload_thumb_to_imgbb(file_id: str) -> str | None:
     if not IMGBB_API_KEY or IMGBB_API_KEY == "YOUR_IMGBB_API_KEY":
         return None
     try:
@@ -91,7 +96,7 @@ def upload_thumb_to_imgbb(file_id):
     return None
 
 
-def send_blogger_post(title, bot_link, thumb_url=None):
+def send_blogger_post(title: str, bot_link: str, thumb_url: str | None = None) -> None:
     img_html = (
         f'<div style="margin:18px 0;border-radius:12px;overflow:hidden;border:1px solid #27272a;background:#09090b;">'
         f'<img src="{thumb_url}" alt="{title}" style="display:block;width:100%;max-height:420px;object-fit:cover;" />'
@@ -178,7 +183,12 @@ def handle_group_video(message):
     else:
         print("Warning: message.video.thumbnail is None")
 
-    save_video(vid_id, video.file_id, title, thumb_url)
+    try:
+        save_video(vid_id, video.file_id, title, thumb_url)
+    except Exception as e:
+        print("Firebase save error:", e)
+        bot.reply_to(message, "❌ Firebase එකට save කරද්දී error එකක් ආවා.")
+        return
 
     try:
         send_blogger_post(title, bot_link, thumb_url)
@@ -218,6 +228,5 @@ def handle_group_video(message):
 
 
 if __name__ == "__main__":
-    init_db()
-    print("Bot is running...")
+    print("Bot is running with Firebase Realtime Database...")
     bot.infinity_polling(skip_pending=True)
